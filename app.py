@@ -1,8 +1,9 @@
 import os
 import logging
-from flask import Flask, request
-import asyncio
+from flask import Flask
+import requests
 from threading import Thread
+import time
 
 # Set up logging
 logging.basicConfig(
@@ -18,59 +19,129 @@ BOT_TOKEN = os.environ.get('BOT_TOKEN', 'your_bot_token_here')
 CHANNEL_HASHES = os.environ.get('CHANNEL_HASHES', 'hash1,hash2,hash3').split(',')
 BOT_USERNAME = os.environ.get('BOT_USERNAME', 'YourBotUsername')
 
-# Initialize bot variables
-bot = None
-application = None
+# Telegram API URL
+TELEGRAM_API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-def initialize_bot():
-    """Initialize the Telegram bot in a separate thread."""
-    global bot, application
-    
-    try:
-        # Import inside function to avoid circular imports
-        from telegram import Bot
-        from telegram.ext import Application, CommandHandler, CallbackQueryHandler
+class TelegramBot:
+    def __init__(self):
+        self.last_update_id = 0
+        self.running = True
         
-        logger.info("🤖 Initializing Telegram bot...")
+    def send_message(self, chat_id, text, reply_markup=None):
+        """Send a message to a Telegram chat."""
+        url = f"{TELEGRAM_API_URL}/sendMessage"
+        payload = {
+            'chat_id': chat_id,
+            'text': text,
+            'parse_mode': 'HTML',
+            'disable_web_page_preview': True
+        }
         
-        # Create bot instance
-        bot = Bot(token=BOT_TOKEN)
+        if reply_markup:
+            payload['reply_markup'] = reply_markup
+            
+        try:
+            response = requests.post(url, json=payload, timeout=10)
+            return response.json()
+        except Exception as e:
+            logger.error(f"Error sending message: {e}")
+            return None
+            
+    def edit_message_text(self, chat_id, message_id, text, reply_markup=None):
+        """Edit an existing message."""
+        url = f"{TELEGRAM_API_URL}/editMessageText"
+        payload = {
+            'chat_id': chat_id,
+            'message_id': message_id,
+            'text': text,
+            'parse_mode': 'HTML'
+        }
         
-        # Create application
-        application = Application.builder().token(BOT_TOKEN).build()
+        if reply_markup:
+            payload['reply_markup'] = reply_markup
+            
+        try:
+            response = requests.post(url, json=payload, timeout=10)
+            return response.json()
+        except Exception as e:
+            logger.error(f"Error editing message: {e}")
+            return None
+            
+    def answer_callback_query(self, callback_query_id):
+        """Answer a callback query."""
+        url = f"{TELEGRAM_API_URL}/answerCallbackQuery"
+        payload = {
+            'callback_query_id': callback_query_id
+        }
         
-        # Add handlers
-        application.add_handler(CommandHandler("start", start_command))
-        application.add_handler(CallbackQueryHandler(button_click_handler))
+        try:
+            response = requests.post(url, json=payload, timeout=10)
+            return response.json()
+        except Exception as e:
+            logger.error(f"Error answering callback: {e}")
+            return None
+            
+    def get_updates(self):
+        """Get new updates from Telegram."""
+        url = f"{TELEGRAM_API_URL}/getUpdates"
+        payload = {
+            'offset': self.last_update_id + 1,
+            'timeout': 30,
+            'allowed_updates': ['message', 'callback_query']
+        }
         
-        logger.info("✅ Bot initialized successfully")
-        logger.info(f"📋 Monitoring {len(CHANNEL_HASHES)} channels")
+        try:
+            response = requests.post(url, json=payload, timeout=35)
+            data = response.json()
+            if data.get('ok'):
+                return data['result']
+            return []
+        except Exception as e:
+            logger.error(f"Error getting updates: {e}")
+            return []
+            
+    def process_update(self, update):
+        """Process a single update."""
+        if 'message' in update and 'text' in update['message']:
+            self.process_message(update['message'])
+        elif 'callback_query' in update:
+            self.process_callback_query(update['callback_query'])
+            
+    def process_message(self, message):
+        """Process a text message."""
+        if message['text'].startswith('/start'):
+            self.handle_start_command(message)
+            
+    def process_callback_query(self, callback_query):
+        """Process a callback query."""
+        self.answer_callback_query(callback_query['id'])
         
-        # Start polling
-        application.run_polling()
-        
-    except ImportError as e:
-        logger.error(f"❌ Missing dependencies: {e}")
-    except Exception as e:
-        logger.error(f"❌ Failed to initialize bot: {e}")
-
-async def start_command(update, context):
-    """Handles the /start command."""
-    try:
-        logger.info(f"Received /start from user: {update.effective_user.id}")
-        
-        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+        if callback_query['data'] == 'show_individual':
+            self.handle_show_individual(callback_query)
+        elif callback_query['data'] == 'back_to_main':
+            self.handle_back_to_main(callback_query)
+            
+    def handle_start_command(self, message):
+        """Handle /start command."""
+        chat_id = message['chat']['id']
         
         # Build the magic tg:// link
         channels_param = ",".join(CHANNEL_HASHES)
         magic_link = f"tg://join?invite={channels_param}"
         
-        # Create the main keyboard
-        keyboard = [
-            [InlineKeyboardButton("🚀 JOIN ALL CHANNELS (1-CLICK)", url=magic_link)],
-            [InlineKeyboardButton("🔗 Join Individually", callback_data='show_individual')]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
+        # Create inline keyboard
+        keyboard = {
+            'inline_keyboard': [
+                [{
+                    'text': '🚀 JOIN ALL CHANNELS (1-CLICK)',
+                    'url': magic_link
+                }],
+                [{
+                    'text': '🔗 Join Individually',
+                    'callback_data': 'show_individual'
+                }]
+            ]
+        }
         
         welcome_text = """
 <b>🎯 Instant Access</b>
@@ -80,63 +151,93 @@ Click the button below to join all our private channels with <b>one click</b>.
 If the 1-click method doesn't work, use the individual option below.
         """
         
-        await update.message.reply_text(
-            welcome_text, 
-            reply_markup=reply_markup, 
-            parse_mode='HTML',
-            disable_web_page_preview=True
+        self.send_message(chat_id, welcome_text, keyboard)
+        
+    def handle_show_individual(self, callback_query):
+        """Show individual join links."""
+        message = callback_query['message']
+        chat_id = message['chat']['id']
+        message_id = message['message_id']
+        
+        # Create buttons for each channel
+        keyboard_buttons = []
+        for i, channel_hash in enumerate(CHANNEL_HASHES, 1):
+            link = f"https://t.me/+{channel_hash}"
+            keyboard_buttons.append([{
+                'text': f'📢 Join Channel {i}',
+                'url': link
+            }])
+            
+        # Add back button
+        keyboard_buttons.append([{
+            'text': '⬅️ Back to Main',
+            'callback_data': 'back_to_main'
+        }])
+        
+        keyboard = {'inline_keyboard': keyboard_buttons}
+        
+        self.edit_message_text(
+            chat_id,
+            message_id,
+            "<b>Select a channel to join:</b>\n\nClick each button to send a join request.",
+            keyboard
         )
         
-    except Exception as e:
-        logger.error(f"Error in start_command: {e}")
-        if update.message:
-            await update.message.reply_text("❌ Sorry, something went wrong. Please try again later.")
-
-async def button_click_handler(update, context):
-    """Handles button clicks."""
-    try:
-        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+    def handle_back_to_main(self, callback_query):
+        """Go back to main menu."""
+        message = callback_query['message']
+        chat_id = message['chat']['id']
+        message_id = message['message_id']
         
-        query = update.callback_query
-        await query.answer()
+        # Build the magic tg:// link
+        channels_param = ",".join(CHANNEL_HASHES)
+        magic_link = f"tg://join?invite={channels_param}"
         
-        if query.data == 'show_individual':
-            # Show individual join links
-            keyboard = []
-            for i, channel_hash in enumerate(CHANNEL_HASHES, 1):
-                link = f"https://t.me/+{channel_hash}"
-                button = InlineKeyboardButton(f"📢 Join Channel {i}", url=link)
-                keyboard.append([button])
-            
-            # Add back button
-            keyboard.append([InlineKeyboardButton("⬅️ Back to Main", callback_data='back_to_main')])
-            
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            await query.edit_message_text(
-                text="<b>Select a channel to join:</b>\n\nClick each button to send a join request.",
-                reply_markup=reply_markup, 
-                parse_mode='HTML'
-            )
-            
-        elif query.data == 'back_to_main':
-            # Go back to main menu
-            channels_param = ",".join(CHANNEL_HASHES)
-            magic_link = f"tg://join?invite={channels_param}"
-            
-            keyboard = [
-                [InlineKeyboardButton("🚀 JOIN ALL CHANNELS (1-CLICK)", url=magic_link)],
-                [InlineKeyboardButton("🔗 Join Individually", callback_data='show_individual')]
+        keyboard = {
+            'inline_keyboard': [
+                [{
+                    'text': '🚀 JOIN ALL CHANNELS (1-CLICK)',
+                    'url': magic_link
+                }],
+                [{
+                    'text': '🔗 Join Individually',
+                    'callback_data': 'show_individual'
+                }]
             ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            await query.edit_message_text(
-                text="<b>🎯 Instant Access</b>\n\nClick the button below to join all our private channels with <b>one click</b>.",
-                reply_markup=reply_markup, 
-                parse_mode='HTML'
-            )
-            
-    except Exception as e:
-        logger.error(f"Error in button_click_handler: {e}")
+        }
+        
+        self.edit_message_text(
+            chat_id,
+            message_id,
+            "<b>🎯 Instant Access</b>\n\nClick the button below to join all our private channels with <b>one click</b>.",
+            keyboard
+        )
+        
+    def run_polling(self):
+        """Run the bot in polling mode."""
+        logger.info("🤖 Starting Telegram bot in polling mode...")
+        logger.info(f"📋 Monitoring {len(CHANNEL_HASHES)} channels")
+        
+        while self.running:
+            try:
+                updates = self.get_updates()
+                for update in updates:
+                    self.process_update(update)
+                    self.last_update_id = max(self.last_update_id, update['update_id'])
+            except Exception as e:
+                logger.error(f"Error in polling loop: {e}")
+                time.sleep(5)
+
+# Create bot instance
+bot = TelegramBot()
+
+def run_bot():
+    """Run the bot in a separate thread."""
+    bot.run_polling()
+
+# Start bot in background thread
+bot_thread = Thread(target=run_bot, daemon=True)
+bot_thread.start()
 
 # Flask Routes
 @app.route('/')
@@ -215,18 +316,7 @@ def health_check():
 @app.route('/test')
 def test_bot():
     """Test endpoint to check bot status."""
-    if bot:
-        return f"✅ Bot is initialized. Monitoring {len(CHANNEL_HASHES)} channels."
-    else:
-        return "❌ Bot not initialized yet. Check logs."
-
-# Start bot in background thread when app starts
-def start_bot_background():
-    """Start the bot in a background thread."""
-    Thread(target=initialize_bot, daemon=True).start()
-
-# Initialize bot when app starts
-start_bot_background()
+    return f"✅ Bot is running. Monitoring {len(CHANNEL_HASHES)} channels."
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8000))
