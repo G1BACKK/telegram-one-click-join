@@ -1,13 +1,8 @@
 import os
 import logging
-from flask import Flask, request, jsonify
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, TypeHandler
-
-# --- Configuration from Environment Variables ---
-BOT_TOKEN = os.environ.get('BOT_TOKEN', 'your_bot_token_here')
-CHANNEL_HASHES = os.environ.get('CHANNEL_HASHES', 'hash1,hash2,hash3').split(',')
-BOT_USERNAME = os.environ.get('BOT_USERNAME', 'YourBotUsername')
+from flask import Flask, request
+import asyncio
+from threading import Thread
 
 # Set up logging
 logging.basicConfig(
@@ -18,25 +13,53 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# Initialize Telegram Bot Application
-def create_application():
-    """Create and configure the Telegram bot application."""
-    application = Application.builder().token(BOT_TOKEN).build()
-    
-    # Add handlers
-    application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CallbackQueryHandler(button_click_handler, pattern='^(show_individual|back_to_main)$'))
-    
-    return application
+# --- Configuration from Environment Variables ---
+BOT_TOKEN = os.environ.get('BOT_TOKEN', 'your_bot_token_here')
+CHANNEL_HASHES = os.environ.get('CHANNEL_HASHES', 'hash1,hash2,hash3').split(',')
+BOT_USERNAME = os.environ.get('BOT_USERNAME', 'YourBotUsername')
 
-# Create bot application instance
-bot_application = create_application()
+# Initialize bot variables
+bot = None
+application = None
 
-# Telegram Bot Command Handlers
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def initialize_bot():
+    """Initialize the Telegram bot in a separate thread."""
+    global bot, application
+    
+    try:
+        # Import inside function to avoid circular imports
+        from telegram import Bot
+        from telegram.ext import Application, CommandHandler, CallbackQueryHandler
+        
+        logger.info("🤖 Initializing Telegram bot...")
+        
+        # Create bot instance
+        bot = Bot(token=BOT_TOKEN)
+        
+        # Create application
+        application = Application.builder().token(BOT_TOKEN).build()
+        
+        # Add handlers
+        application.add_handler(CommandHandler("start", start_command))
+        application.add_handler(CallbackQueryHandler(button_click_handler))
+        
+        logger.info("✅ Bot initialized successfully")
+        logger.info(f"📋 Monitoring {len(CHANNEL_HASHES)} channels")
+        
+        # Start polling
+        application.run_polling()
+        
+    except ImportError as e:
+        logger.error(f"❌ Missing dependencies: {e}")
+    except Exception as e:
+        logger.error(f"❌ Failed to initialize bot: {e}")
+
+async def start_command(update, context):
     """Handles the /start command."""
     try:
         logger.info(f"Received /start from user: {update.effective_user.id}")
+        
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
         
         # Build the magic tg:// link
         channels_param = ",".join(CHANNEL_HASHES)
@@ -66,11 +89,14 @@ If the 1-click method doesn't work, use the individual option below.
         
     except Exception as e:
         logger.error(f"Error in start_command: {e}")
-        await update.message.reply_text("❌ Sorry, something went wrong. Please try again later.")
+        if update.message:
+            await update.message.reply_text("❌ Sorry, something went wrong. Please try again later.")
 
-async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def button_click_handler(update, context):
     """Handles button clicks."""
     try:
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+        
         query = update.callback_query
         await query.answer()
         
@@ -184,41 +210,25 @@ def landing_page():
 @app.route('/health')
 def health_check():
     """Health check endpoint."""
-    return jsonify({"status": "healthy", "service": "telegram-one-click-join"})
+    return "✅ OK - Service is running"
 
-@app.route('/webhook', methods=['POST'])
-async def webhook():
-    """Webhook endpoint for Telegram updates."""
-    try:
-        data = await request.get_json()
-        update = Update.de_json(data, bot_application.bot)
-        await bot_application.process_update(update)
-        return jsonify({"status": "ok"})
-    except Exception as e:
-        logger.error(f"Webhook error: {e}")
-        return jsonify({"status": "error"})
+@app.route('/test')
+def test_bot():
+    """Test endpoint to check bot status."""
+    if bot:
+        return f"✅ Bot is initialized. Monitoring {len(CHANNEL_HASHES)} channels."
+    else:
+        return "❌ Bot not initialized yet. Check logs."
 
-def start_bot_polling():
-    """Start the bot in polling mode."""
-    try:
-        logger.info("🤖 Starting Telegram bot in polling mode...")
-        logger.info(f"📋 Monitoring {len(CHANNEL_HASHES)} channels")
-        bot_application.run_polling()
-    except Exception as e:
-        logger.error(f"Failed to start bot: {e}")
+# Start bot in background thread when app starts
+def start_bot_background():
+    """Start the bot in a background thread."""
+    Thread(target=initialize_bot, daemon=True).start()
 
-# Start bot when imported
+# Initialize bot when app starts
+start_bot_background()
+
 if __name__ == '__main__':
-    import threading
-    
-    # Start bot in a separate thread
-    bot_thread = threading.Thread(target=start_bot_polling, daemon=True)
-    bot_thread.start()
-    
-    # Start Flask app
     port = int(os.environ.get('PORT', 8000))
     logger.info(f"🌐 Starting Flask server on port {port}")
     app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
-else:
-    # For Render deployment
-    logger.info("🚀 Application initialized on Render")
